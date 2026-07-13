@@ -1,6 +1,6 @@
 """
 Database utility for storing player inventory and ender chest data.
-Based on PrimeBDS's database implementation.
+Uses NBT JSON blob storage for full-fidelity item serialization.
 """
 
 import sqlite3
@@ -11,11 +11,258 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from endstone import Player
+from endstone.inventory import ItemStack
+
+# NBT classes — may live under endstone.nbt or directly under endstone
+try:
+    from endstone.nbt import (
+        CompoundTag, ListTag, ByteTag, ShortTag, IntTag, LongTag,
+        FloatTag, DoubleTag, StringTag, ByteArrayTag, IntArrayTag,
+    )
+except (ImportError, AttributeError):
+    from endstone import (
+        CompoundTag, ListTag, ByteTag, ShortTag, IntTag, LongTag,
+        FloatTag, DoubleTag, StringTag, ByteArrayTag, IntArrayTag,
+    )
 
 
 # Database folder path
 DB_FOLDER = Path("plugins/inventory_manager_data")
 DB_FOLDER.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# NBT ↔ dict serialization helpers
+# ---------------------------------------------------------------------------
+
+def nbt_to_dict(tag):
+    """Recursively convert any NBT Tag to a JSON-serializable Python object."""
+    if isinstance(tag, CompoundTag):
+        return {
+            "_type": "compound",
+            "value": {k: nbt_to_dict(v) for k, v in tag.items()}
+        }
+    elif isinstance(tag, ListTag):
+        return {
+            "_type": "list",
+            "value": [nbt_to_dict(tag[i]) for i in range(tag.size())]
+        }
+    elif isinstance(tag, ByteTag):
+        return {"_type": "byte", "value": tag.value}
+    elif isinstance(tag, ShortTag):
+        return {"_type": "short", "value": tag.value}
+    elif isinstance(tag, IntTag):
+        return {"_type": "int", "value": tag.value}
+    elif isinstance(tag, LongTag):
+        return {"_type": "long", "value": tag.value}
+    elif isinstance(tag, FloatTag):
+        return {"_type": "float", "value": tag.value}
+    elif isinstance(tag, DoubleTag):
+        return {"_type": "double", "value": tag.value}
+    elif isinstance(tag, StringTag):
+        return {"_type": "string", "value": tag.value}
+    elif isinstance(tag, ByteArrayTag):
+        return {"_type": "byte_array", "value": list(tag)}
+    elif isinstance(tag, IntArrayTag):
+        return {"_type": "int_array", "value": list(tag)}
+    else:
+        return {"_type": "unknown", "value": str(tag)}
+
+
+def dict_to_nbt(data):
+    """Recursively rebuild an NBT Tag from a dict produced by nbt_to_dict."""
+    t = data.get("_type", "unknown")
+    v = data.get("value")
+
+    if t == "compound":
+        tag = CompoundTag()
+        for key, child in v.items():
+            tag[key] = dict_to_nbt(child)
+        return tag
+    elif t == "list":
+        tag = ListTag()
+        for child in v:
+            tag.append(dict_to_nbt(child))
+        return tag
+    elif t == "byte":
+        return ByteTag(int(v))
+    elif t == "short":
+        return ShortTag(int(v))
+    elif t == "int":
+        return IntTag(int(v))
+    elif t == "long":
+        return LongTag(int(v))
+    elif t == "float":
+        return FloatTag(float(v))
+    elif t == "double":
+        return DoubleTag(float(v))
+    elif t == "string":
+        return StringTag(str(v))
+    elif t == "byte_array":
+        return ByteArrayTag(v)
+    elif t == "int_array":
+        return IntArrayTag(v)
+    else:
+        return StringTag(str(v))
+
+
+# ---------------------------------------------------------------------------
+# Item serialization / deserialization
+# ---------------------------------------------------------------------------
+
+def serialize_item(item, slot_num: int, slot_type: str = "slot") -> dict:
+    """Serialize an ItemStack (or None/air) to a JSON-friendly dict."""
+    if item is None or str(item.type) == "minecraft:air":
+        return {"slot": slot_num, "slot_type": slot_type, "type": None}
+
+    result = {
+        "slot": slot_num,
+        "slot_type": slot_type,
+        "type": str(item.type),
+        "amount": item.amount,
+    }
+
+    # Save the full NBT compound tag — this preserves everything:
+    # enchantments, lore, display name, shulker contents, damage, etc.
+    try:
+        nbt_tag = item.nbt
+        if nbt_tag is not None:
+            result["nbt"] = nbt_to_dict(nbt_tag)
+    except Exception:
+        pass
+
+    return result
+
+
+def deserialize_item(item_data: dict) -> Optional[ItemStack]:
+    """Recreate an ItemStack from a dict produced by serialize_item."""
+    if item_data.get("type") is None:
+        return None
+
+    item_type = item_data["type"]
+    amount = item_data.get("amount", 1)
+
+    item = ItemStack(item_type, amount)
+
+    # Restore the full NBT compound tag
+    nbt_data = item_data.get("nbt")
+    if nbt_data is not None:
+        try:
+            tag = dict_to_nbt(nbt_data)
+            if isinstance(tag, CompoundTag):
+                item.nbt = tag
+        except Exception:
+            pass
+
+    return item
+
+
+def get_item_display_info(item_data: dict) -> dict:
+    """Extract display information from a serialized item dict for UI display."""
+    if item_data.get("type") is None:
+        return {"name": "", "amount": 0, "type": "minecraft:air"}
+
+    item_type = item_data.get("type", "minecraft:air")
+    amount = item_data.get("amount", 1)
+    slot = item_data.get("slot", 0)
+    slot_type = item_data.get("slot_type", "slot")
+
+    # Default display name from type
+    display_name = item_type.replace("minecraft:", "").replace("_", " ").title()
+
+    # Extract display info from NBT if available
+    lore = []
+    enchants = {}
+    damage = 0
+
+    nbt = item_data.get("nbt")
+    if nbt and isinstance(nbt, dict) and nbt.get("_type") == "compound":
+        nbt_value = nbt.get("value", {})
+
+        # Extract display name and lore
+        display_tag = nbt_value.get("display")
+        if display_tag and isinstance(display_tag, dict) and display_tag.get("_type") == "compound":
+            display_val = display_tag.get("value", {})
+
+            name_tag = display_val.get("Name")
+            if name_tag and isinstance(name_tag, dict):
+                display_name = name_tag.get("value", display_name)
+
+            lore_tag = display_val.get("Lore")
+            if lore_tag and isinstance(lore_tag, dict) and lore_tag.get("_type") == "list":
+                lore = [entry.get("value", "") for entry in lore_tag.get("value", [])
+                        if isinstance(entry, dict)]
+
+        # Extract enchantments
+        ench_tag = nbt_value.get("ench")
+        if ench_tag and isinstance(ench_tag, dict) and ench_tag.get("_type") == "list":
+            for ench_entry in ench_tag.get("value", []):
+                if isinstance(ench_entry, dict) and ench_entry.get("_type") == "compound":
+                    ench_val = ench_entry.get("value", {})
+                    ench_id = ench_val.get("id", {}).get("value", 0) if isinstance(ench_val.get("id"), dict) else 0
+                    ench_lvl = ench_val.get("lvl", {}).get("value", 1) if isinstance(ench_val.get("lvl"), dict) else 1
+                    enchants[f"Enchantment {ench_id}"] = ench_lvl
+
+        # Extract damage
+        damage_tag = nbt_value.get("Damage")
+        if damage_tag and isinstance(damage_tag, dict):
+            damage = damage_tag.get("value", 0)
+
+    return {
+        "name": display_name,
+        "amount": amount,
+        "type": item_type,
+        "slot": slot,
+        "slot_type": slot_type,
+        "damage": damage,
+        "lore": lore,
+        "enchants": enchants,
+        "display_name": display_name,
+    }
+
+
+def extract_shulker_contents(item_data: dict) -> list:
+    """Extract the contents of a shulker box from its serialized NBT data.
+    Returns a list of dicts with 'name' and 'count' for each contained item."""
+    contents = []
+
+    nbt = item_data.get("nbt")
+    if not nbt or not isinstance(nbt, dict) or nbt.get("_type") != "compound":
+        return contents
+
+    nbt_value = nbt.get("value", {})
+
+    # Shulker box contents are stored in the "Items" tag
+    items_tag = nbt_value.get("Items")
+    if not items_tag or not isinstance(items_tag, dict) or items_tag.get("_type") != "list":
+        return contents
+
+    for item_entry in items_tag.get("value", []):
+        if not isinstance(item_entry, dict) or item_entry.get("_type") != "compound":
+            continue
+
+        entry_val = item_entry.get("value", {})
+
+        # Get item Name
+        name_tag = entry_val.get("Name")
+        item_name = ""
+        if name_tag and isinstance(name_tag, dict):
+            item_name = name_tag.get("value", "unknown")
+        if not item_name:
+            continue
+
+        # Clean up name for display
+        clean_name = item_name.replace("minecraft:", "").replace("_", " ").title()
+
+        # Get item Count
+        count_tag = entry_val.get("Count")
+        count = 1
+        if count_tag and isinstance(count_tag, dict):
+            count = count_tag.get("value", 1)
+
+        contents.append({"name": clean_name, "count": count})
+
+    return contents
 
 
 @dataclass
@@ -25,23 +272,6 @@ class User:
     name: str
     last_join: int = 0
     last_leave: int = 0
-
-
-@dataclass
-class InventoryItem:
-    """Inventory item data structure"""
-    xuid: str
-    name: str
-    slot_type: str  # "slot", "helmet", "chestplate", "leggings", "boots", "offhand"
-    slot: int
-    item_type: str
-    amount: int
-    damage: int
-    display_name: str
-    enchants: str  # JSON string
-    lore: str      # JSON string
-    unbreakable: bool
-    data: Optional[int]
 
 
 class DatabaseManager:
@@ -60,13 +290,11 @@ class DatabaseManager:
     def execute(self, query: str, params: tuple = (), readonly: bool = False) -> sqlite3.Cursor:
         """Execute a database query with thread safety"""
         if readonly:
-            # For read-only queries, use a separate connection
             read_conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             cursor = read_conn.cursor()
             cursor.execute(query, params)
             return cursor
         else:
-            # For write queries, use lock
             with self._lock:
                 self.cursor.execute(query, params)
                 if not query.strip().upper().startswith("SELECT"):
@@ -79,7 +307,7 @@ class DatabaseManager:
 
 
 class InventoryDB(DatabaseManager):
-    """Database for storing player inventory and ender chest data"""
+    """Database for storing player inventory and ender chest data using NBT JSON blobs"""
 
     def __init__(self, db_name: str = "inventories.db"):
         """Initialize inventory database"""
@@ -98,46 +326,25 @@ class InventoryDB(DatabaseManager):
             )
         """)
 
-        # Inventories table
+        # Inventories table — stores full NBT JSON blob
         self.execute("""
-            CREATE TABLE IF NOT EXISTS inventories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                xuid TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS inventories_v2 (
+                xuid TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                slot_type TEXT NOT NULL,
-                slot INTEGER NOT NULL,
-                type TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                damage INTEGER DEFAULT 0,
-                display_name TEXT,
-                enchants TEXT,
-                lore TEXT,
-                unbreakable INTEGER DEFAULT 0,
-                data INTEGER
+                items_json TEXT NOT NULL
             )
         """)
 
-        # Ender chests table
+        # Ender chests table — stores full NBT JSON blob
         self.execute("""
-            CREATE TABLE IF NOT EXISTS ender_chests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                xuid TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS ender_chests_v2 (
+                xuid TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                slot INTEGER NOT NULL,
-                type TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                damage INTEGER DEFAULT 0,
-                display_name TEXT,
-                enchants TEXT,
-                lore TEXT,
-                unbreakable INTEGER DEFAULT 0,
-                data INTEGER
+                items_json TEXT NOT NULL
             )
         """)
 
-        # Create indices for faster lookups
-        self.execute("CREATE INDEX IF NOT EXISTS idx_inventories_xuid ON inventories(xuid)")
-        self.execute("CREATE INDEX IF NOT EXISTS idx_ender_chests_xuid ON ender_chests(xuid)")
+        # Indices
         self.execute("CREATE INDEX IF NOT EXISTS idx_users_name ON users(name)")
 
     def save_user(self, player: Player, join_time: int):
@@ -187,241 +394,82 @@ class InventoryDB(DatabaseManager):
         return users
 
     def save_inventory(self, player: Player):
-        """Save player's inventory to database"""
-        # Prepare inventory data
-        values = []
+        """Save player's full inventory (main + armor + offhand) as NBT JSON blob"""
+        items = []
 
         # Main inventory slots
         for i in range(player.inventory.size):
-            item = player.inventory.get_item(i)
-            if not item or str(item.type) == "minecraft:air":
-                continue
-
-            # Extract item metadata
-            meta = getattr(item, "item_meta", None)
-            display_name = ""
-            enchants = {}
-            lore = []
-            unbreakable = False
-
-            if meta:
-                display_name = getattr(meta, "display_name", "")
-                enchants = getattr(meta, "enchants", {})
-                lore = getattr(meta, "lore", [])
-                unbreakable = getattr(meta, "is_unbreakable", False)
-
-            values.append((
-                player.xuid,
-                player.name,
-                "slot",
-                i,
-                str(item.type),
-                item.amount,
-                getattr(meta, "damage", 0) if meta else 0,
-                display_name,
-                json.dumps(enchants),
-                json.dumps(lore),
-                1 if unbreakable else 0,
-                getattr(item, "data", None)
-            ))
+            items.append(serialize_item(player.inventory.get_item(i), i, "slot"))
 
         # Armor slots
-        armor_items = [
-            ("helmet", getattr(player.inventory, "helmet", None)),
-            ("chestplate", getattr(player.inventory, "chestplate", None)),
-            ("leggings", getattr(player.inventory, "leggings", None)),
-            ("boots", getattr(player.inventory, "boots", None)),
-            ("offhand", getattr(player.inventory, "item_in_off_hand", None))
-        ]
+        armor_map = {
+            "helmet": -1,
+            "chestplate": -2,
+            "leggings": -3,
+            "boots": -4,
+            "item_in_off_hand": -5,
+        }
+        for attr_name, slot_num in armor_map.items():
+            item = getattr(player.inventory, attr_name, None)
+            items.append(serialize_item(item, slot_num, attr_name))
 
-        for slot_type, item in armor_items:
-            if not item or str(item.type) == "minecraft:air":
-                continue
+        items_json = json.dumps(items, ensure_ascii=False)
 
-            meta = getattr(item, "item_meta", None)
-            display_name = ""
-            enchants = {}
-            lore = []
-            unbreakable = False
-
-            if meta:
-                display_name = getattr(meta, "display_name", "")
-                enchants = getattr(meta, "enchants", {})
-                lore = getattr(meta, "lore", [])
-                unbreakable = getattr(meta, "is_unbreakable", False)
-
-            values.append((
-                player.xuid,
-                player.name,
-                slot_type,
-                0,  # Armor slots don't have slot numbers
-                str(item.type),
-                item.amount,
-                getattr(meta, "damage", 0) if meta else 0,
-                display_name,
-                json.dumps(enchants),
-                json.dumps(lore),
-                1 if unbreakable else 0,
-                getattr(item, "data", None)
-            ))
-
-        # Save to database
         with self._lock:
-            # Delete old inventory data
-            self.cursor.execute("DELETE FROM inventories WHERE xuid = ?", (player.xuid,))
-
-            # Insert new inventory data
-            if values:
-                self.cursor.executemany("""
-                    INSERT INTO inventories
-                    (xuid, name, slot_type, slot, type, amount, damage, display_name, enchants, lore, unbreakable, data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, values)
-
+            self.cursor.execute("""
+                INSERT OR REPLACE INTO inventories_v2 (xuid, name, items_json)
+                VALUES (?, ?, ?)
+            """, (player.xuid, player.name, items_json))
             self.conn.commit()
 
     def get_inventory(self, xuid: str) -> List[Dict[str, Any]]:
-        """Get player's inventory from database"""
+        """Get player's inventory from database as list of item dicts"""
         self.cursor.execute("""
-            SELECT xuid, name, slot_type, slot, type, amount, damage, display_name, enchants, lore, unbreakable, data
-            FROM inventories
-            WHERE xuid = ?
+            SELECT items_json FROM inventories_v2 WHERE xuid = ?
         """, (xuid,))
 
-        items = []
-        for row in self.cursor.fetchall():
-            try:
-                # Parse JSON fields
-                enchants = {}
-                lore = []
+        row = self.cursor.fetchone()
+        if not row or not row[0]:
+            return []
 
-                if row[8] and row[8] not in ("null", "0", ""):
-                    try:
-                        enchants = json.loads(row[8])
-                    except:
-                        enchants = {}
-
-                if row[9] and row[9] not in ("null", "0", ""):
-                    try:
-                        lore = json.loads(row[9])
-                    except:
-                        lore = []
-
-                items.append({
-                    "xuid": row[0],
-                    "name": row[1],
-                    "slot_type": row[2],
-                    "slot": int(row[3]) if row[3] is not None else 0,
-                    "type": row[4] or "minecraft:air",
-                    "amount": int(row[5]) if row[5] is not None else 1,
-                    "damage": int(row[6]) if row[6] is not None else 0,
-                    "display_name": row[7] or "",
-                    "enchants": enchants,
-                    "lore": lore,
-                    "unbreakable": bool(row[10]) if row[10] is not None else False,
-                    "data": int(row[11]) if row[11] is not None else None
-                })
-            except Exception as e:
-                print(f"[InventoryDB] Failed to load inventory row for {xuid}: {e}")
-                continue
-
-        return items
+        try:
+            items = json.loads(row[0])
+            # Filter out empty slots
+            return [item for item in items if item.get("type") is not None]
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"[InventoryDB] Failed to parse inventory for {xuid}: {e}")
+            return []
 
     def save_enderchest(self, player: Player):
-        """Save player's ender chest to database"""
-        values = []
+        """Save player's ender chest as NBT JSON blob"""
+        items = []
 
-        # Ender chest slots
         for i in range(player.ender_chest.size):
-            item = player.ender_chest.get_item(i)
-            if not item or str(item.type) == "minecraft:air":
-                continue
+            items.append(serialize_item(player.ender_chest.get_item(i), i, "slot"))
 
-            # Extract item metadata
-            meta = getattr(item, "item_meta", None)
-            display_name = ""
-            enchants = {}
-            lore = []
-            unbreakable = False
+        items_json = json.dumps(items, ensure_ascii=False)
 
-            if meta:
-                display_name = getattr(meta, "display_name", "")
-                enchants = getattr(meta, "enchants", {})
-                lore = getattr(meta, "lore", [])
-                unbreakable = getattr(meta, "is_unbreakable", False)
-
-            values.append((
-                player.xuid,
-                player.name,
-                i,
-                str(item.type),
-                item.amount,
-                getattr(meta, "damage", 0) if meta else 0,
-                display_name,
-                json.dumps(enchants),
-                json.dumps(lore),
-                1 if unbreakable else 0,
-                getattr(item, "data", None)
-            ))
-
-        # Save to database
         with self._lock:
-            # Delete old ender chest data
-            self.cursor.execute("DELETE FROM ender_chests WHERE xuid = ?", (player.xuid,))
-
-            # Insert new ender chest data
-            if values:
-                self.cursor.executemany("""
-                    INSERT INTO ender_chests
-                    (xuid, name, slot, type, amount, damage, display_name, enchants, lore, unbreakable, data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, values)
-
+            self.cursor.execute("""
+                INSERT OR REPLACE INTO ender_chests_v2 (xuid, name, items_json)
+                VALUES (?, ?, ?)
+            """, (player.xuid, player.name, items_json))
             self.conn.commit()
 
     def get_enderchest(self, xuid: str) -> List[Dict[str, Any]]:
-        """Get player's ender chest from database"""
+        """Get player's ender chest from database as list of item dicts"""
         self.cursor.execute("""
-            SELECT xuid, name, slot, type, amount, damage, display_name, enchants, lore, unbreakable, data
-            FROM ender_chests
-            WHERE xuid = ?
+            SELECT items_json FROM ender_chests_v2 WHERE xuid = ?
         """, (xuid,))
 
-        items = []
-        for row in self.cursor.fetchall():
-            try:
-                # Parse JSON fields
-                enchants = {}
-                lore = []
+        row = self.cursor.fetchone()
+        if not row or not row[0]:
+            return []
 
-                if row[7] and row[7] not in ("null", "0", ""):
-                    try:
-                        enchants = json.loads(row[7])
-                    except:
-                        enchants = {}
-
-                if row[8] and row[8] not in ("null", "0", ""):
-                    try:
-                        lore = json.loads(row[8])
-                    except:
-                        lore = []
-
-                items.append({
-                    "xuid": row[0],
-                    "name": row[1],
-                    "slot": int(row[2]) if row[2] is not None else 0,
-                    "type": row[3] or "minecraft:air",
-                    "amount": int(row[4]) if row[4] is not None else 1,
-                    "damage": int(row[5]) if row[5] is not None else 0,
-                    "display_name": row[6] or "",
-                    "enchants": enchants,
-                    "lore": lore,
-                    "unbreakable": bool(row[9]) if row[9] is not None else False,
-                    "data": int(row[10]) if row[10] is not None else None
-                })
-            except Exception as e:
-                print(f"[InventoryDB] Failed to load ender chest row for {xuid}: {e}")
-                continue
-
-        return items
-
+        try:
+            items = json.loads(row[0])
+            # Filter out empty slots
+            return [item for item in items if item.get("type") is not None]
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"[InventoryDB] Failed to parse ender chest for {xuid}: {e}")
+            return []

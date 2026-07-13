@@ -1,32 +1,22 @@
 from endstone.plugin import Plugin
 from endstone.command import Command, CommandSender
 from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent
-from endstone.form import ActionForm, MessageForm, ModalForm, TextInput
+from endstone.form import ActionForm, ModalForm, TextInput, Dropdown
 from endstone import Player
-import os
+from endstone.inventory import ItemStack
 import time
-from pathlib import Path
-from .db_util import InventoryDB
+import json
+from .db_util import (
+    InventoryDB, deserialize_item, serialize_item,
+)
+import builtins
+if not hasattr(builtins, "Menu"):
+    class DummyMenu:
+        pass
+    builtins.Menu = DummyMenu
 
-# Try to import ChestForm for visual inventory display
-try:
-    from chest_form_api_endstone import ChestForm
-    CHEST_FORM_AVAILABLE = True
-except ImportError:
-    CHEST_FORM_AVAILABLE = False
-
-# Try to import RapidNBT for offline player data
-try:
-    import rapidnbt as RapidNBT
-    RAPIDNBT_AVAILABLE = True
-except ImportError:
-    try:
-        import RapidNBT
-        RAPIDNBT_AVAILABLE = True
-    except ImportError:
-        RAPIDNBT_AVAILABLE = False
-        print("[InventoryManager] RapidNBT not available - offline player viewing disabled")
-
+from endstone_inventoryui import Menu, MenuType, MenuTransaction, MenuTransactionResult
+builtins.Menu = Menu
 
 # ──────────────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -40,82 +30,6 @@ def online_players(plugin: Plugin):
 def player_name(player: Player) -> str:
     """Get player's display name"""
     return player.name
-
-
-def get_inventory(player: Player):
-    """Get player's main inventory"""
-    try:
-        return player.inventory
-    except AttributeError:
-        return None
-
-
-def get_ender(player: Player):
-    """Get player's ender chest inventory"""
-    try:
-        return player.ender_chest
-    except AttributeError:
-        return None
-
-
-def inv_size(inventory) -> int:
-    """Get inventory size"""
-    try:
-        return inventory.size
-    except AttributeError:
-        return 0
-
-
-def get_item_from_slot(inventory, slot: int):
-    """Get item from inventory slot"""
-    try:
-        return inventory.get_item(slot)
-    except (AttributeError, IndexError):
-        return None
-
-
-def is_air(item) -> bool:
-    """Check if item is air/empty"""
-    if item is None:
-        return True
-    try:
-        item_type = str(item.type).lower()
-        return item_type in ["air", "minecraft:air"] or item.amount == 0
-    except AttributeError:
-        return True
-
-
-def item_display_name(item) -> str:
-    """Get item display name"""
-    try:
-        # Try custom name first
-        if hasattr(item, 'custom_name') and item.custom_name:
-            return item.custom_name
-        # Fall back to type name
-        if hasattr(item, 'type'):
-            return str(item.type).replace("_", " ").title()
-        return "Unknown Item"
-    except AttributeError:
-        return "Unknown Item"
-
-
-def add_item(inventory, item) -> bool:
-    """Add item to inventory, returns True if successful"""
-    try:
-        result = inventory.add_item(item)
-        # If result is empty dict or None, item was added successfully
-        return not result or len(result) == 0
-    except (AttributeError, Exception):
-        return False
-
-
-def set_item_in_slot(inventory, slot: int, item) -> bool:
-    """Set item in specific slot, returns True if successful"""
-    try:
-        inventory.set_item(slot, item)
-        return True
-    except (AttributeError, IndexError, Exception):
-        return False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -142,9 +56,7 @@ class InventoryManagerPlugin(Plugin):
 
     def on_enable(self) -> None:
         """Called when plugin is enabled"""
-        self.logger.info("Inventory Manager Plugin enabled!")
-        self.logger.info(f"ChestForm available: {CHEST_FORM_AVAILABLE}")
-        self.logger.info(f"RapidNBT available: {RAPIDNBT_AVAILABLE}")
+        self.logger.info("Inventory Manager Plugin v1.0.13 enabled!")
 
         # Initialize database
         try:
@@ -154,20 +66,11 @@ class InventoryManagerPlugin(Plugin):
             self.logger.error(f"Failed to initialize database: {e}")
             self.db = None
 
-        if RAPIDNBT_AVAILABLE and CHEST_FORM_AVAILABLE:
-            self.logger.info("Offline player ender chest viewing is ENABLED (Database + NBT fallback)")
-        else:
-            self.logger.warning("Offline player viewing is DISABLED - missing dependencies")
-            if not CHEST_FORM_AVAILABLE:
-                self.logger.warning("  - ChestForm not found (install chest_form_api_endstone)")
-            if not RAPIDNBT_AVAILABLE:
-                self.logger.warning("  - RapidNBT not found (install RapidNBT)")
-
+        self.logger.info("Visual display is ENABLED (InventoryUI)")
         self.register_events(self)
 
     def on_disable(self) -> None:
         """Called when plugin is disabled"""
-        # Close database connection
         if hasattr(self, 'db') and self.db:
             try:
                 self.db.close()
@@ -188,7 +91,6 @@ class InventoryManagerPlugin(Plugin):
                 sender.send_error_message("§cYou don't have permission to use this command!")
                 return True
             
-            # Open the main menu
             self.open(sender)
             return True
         
@@ -222,14 +124,9 @@ class InventoryManagerPlugin(Plugin):
             player = event.player
             leave_time = int(time.time())
 
-            # Update leave time
             self.db.update_user_leave_time(player.xuid, leave_time)
-
-            # Save inventory
             self.db.save_inventory(player)
             self.logger.debug(f"Saved inventory for {player.name}")
-
-            # Save ender chest
             self.db.save_enderchest(player)
             self.logger.debug(f"Saved ender chest for {player.name}")
 
@@ -237,1003 +134,415 @@ class InventoryManagerPlugin(Plugin):
             self.logger.error(f"Failed to save player data on quit: {e}")
 
     # ──────────────────────────────────────────────────────────────────────
-    # MAIN MENU
+    # UNIFIED MANAGEMENT INTERFACE
     # ──────────────────────────────────────────────────────────────────────
     
     def open(self, player: Player):
-        """Open the main inventory manager menu"""
-        form = ActionForm(
-            title="§l§6Inventory Manager",
-            content="§7Manage player inventories"
+        """Open the unified inventory manager menu"""
+        if not hasattr(self, 'db') or not self.db:
+            player.send_message("§cDatabase not available.")
+            return
+
+        opls = online_players(self)
+        online_names = [player_name(pl) for pl in opls]
+
+        # 1. Container type selection dropdown
+        container_dropdown = Dropdown(
+            label="Container Type to inspect",
+            options=["Inventory", "Ender Chest"]
         )
-        form.add_button("§aOnline Players")
 
-        if RAPIDNBT_AVAILABLE and CHEST_FORM_AVAILABLE:
-            form.add_button("§eOffline Players §7(Ender Chest Only)")
-            form.add_button("§cClose")
-        else:
-            form.add_button("§cClose")
+        # 2. Select online player dropdown (with offline fallback as default option)
+        player_dropdown = Dropdown(
+            label="Select Online Player (or select '-- Offline Player --' and type name below)",
+            options=["-- Offline Player (Use Textbox) --"] + online_names
+        )
 
-        def on_submit(pl, idx):
-            if idx == 0:
-                return self._pick_online_player(pl)
-            elif idx == 1:
-                if RAPIDNBT_AVAILABLE and CHEST_FORM_AVAILABLE:
-                    return self._pick_offline_player(pl)
-                # else: close
-            # idx == 2 or None: close
+        # 3. Text input for offline lookup
+        name_input = TextInput(
+            label="Offline Player Name (ignored if online player selected above)",
+            placeholder="Type offline player name...",
+            default_value=""
+        )
+
+        form = ModalForm(
+            title="§l§6Inventory Manager",
+            controls=[container_dropdown, player_dropdown, name_input]
+        )
+
+        def on_submit(pl, data):
+            if data is None or data == "":
+                return  # Form closed
+
+            # Parse JSON response from modal form
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except Exception as e:
+                    self.logger.error(f"Failed to parse form response: {e}")
+                    return
+
+            if not isinstance(data, list) or len(data) < 2:
+                return
+
+            container_type_idx = int(data[0])
+            online_choice_idx = int(data[1])
+            offline_name_input = data[2].strip() if len(data) > 2 else ""
+
+            # Check container type
+            container_type = "inv" if container_type_idx == 0 else "ender"
+
+            # Determine target player
+            if online_choice_idx == 0:
+                # Offline Lookup
+                if not offline_name_input:
+                    pl.send_message("§cPlease enter an offline player name, or select an online player.")
+                    return self.open(pl)
+
+                try:
+                    target_users = self.db.search_users_by_name(offline_name_input)
+                    if not target_users:
+                        pl.send_message(f"§cNo player found matching '§e{offline_name_input}§c' in database.")
+                        pl.send_message("§7Note: Players must join at least once to be stored.")
+                        return self.open(pl)
+
+                    if len(target_users) > 1:
+                        # Multiple matches - show disambiguation menu
+                        disambiguate = ActionForm(
+                            title="§lMultiple Matches Found",
+                            content=f"§7Found {len(target_users)} players matching '§e{offline_name_input}§7'"
+                        )
+                        for user in target_users:
+                            disambiguate.add_button(f"§7{user.name}")
+                        disambiguate.add_button("« Search Again")
+
+                        def on_disambiguate_select(viewer, idx):
+                            if idx is None:
+                                return self.open(viewer)
+                            try:
+                                idx = int(idx)
+                            except (ValueError, TypeError):
+                                return self.open(viewer)
+
+                            if idx >= len(target_users):
+                                return self.open(viewer)
+                            user = target_users[idx]
+                            if container_type == "inv":
+                                return self._open_offline_inventory_ui(viewer, user)
+                            else:
+                                return self._open_offline_enderchest_ui(viewer, user)
+
+                        disambiguate.on_submit = on_disambiguate_select
+                        pl.send_form(disambiguate)
+                        return
+                    else:
+                        # Single offline match
+                        user = target_users[0]
+                        if container_type == "inv":
+                            return self._open_offline_inventory_ui(pl, user)
+                        else:
+                            return self._open_offline_enderchest_ui(pl, user)
+                except Exception as e:
+                    self.logger.error(f"Offline lookup error: {e}")
+                    pl.send_message(f"§cLookup error: {e}")
+                    return self.open(pl)
+            else:
+                # Online Player from dropdown
+                target_name = online_names[online_choice_idx - 1]
+                target_player = None
+                for live in online_players(self):
+                    if player_name(live) == target_name:
+                        target_player = live
+                        break
+
+                if not target_player:
+                    pl.send_message("§cThe selected player went offline.")
+                    return self.open(pl)
+
+                if container_type == "inv":
+                    return self._open_online_inventory_ui(pl, target_player)
+                else:
+                    return self._open_online_enderchest_ui(pl, target_player)
 
         form.on_submit = on_submit
         player.send_form(form)
 
     # ──────────────────────────────────────────────────────────────────────
-    # ONLINE INVENTORIES FLOW
+    # ONLINE CONTAINERS HANDLING
     # ──────────────────────────────────────────────────────────────────────
-    def _pick_online_player(self, p: Player):
-        opls = online_players(self)
-        names = [player_name(pl) for pl in opls]
 
-        if not names:
-            p.send_message("§7No players online.")
-            return self.open(p)
-
-        form = ActionForm(title="§lOnline Players", content="Pick a player")
-        for n in names: form.add_button(n)
-        form.add_button("Back")
-
-        def on_submit(pl, idx):
-            if idx is None or idx < 0 or idx >= len(names):
-                return self.open(pl)
-            # resolve live object again, avoid stale refs
-            target = None
-            for live in online_players(self):
-                if player_name(live) == names[idx]:
-                    target = live; break
-            if not target:
-                pl.send_message("§7Player went offline.")
-                return self._pick_online_player(pl)
-            return self._inspect_online_player(pl, target)
-        form.on_submit = on_submit
-        p.send_form(form)
-
-    def _inspect_online_player(self, viewer: Player, target: Player):
-        """Main inspection menu - choose between Inventory or Ender Chest"""
+    def _open_online_inventory_ui(self, viewer: Player, target: Player):
+        """Open target player's inventory as interactive Menu using endstone-inventoryui"""
         tname = player_name(target)
-        form = ActionForm(
-            title=f"§lInspect: {tname}",
-            content="Choose what to inspect:"
-        )
-        form.add_button("§6Inventory")      # 0
-        form.add_button("§dEnder Chest")    # 1
-        form.add_button("Back")             # 2
+        menu = Menu(MenuType.DOUBLE_CHEST, f"{tname}'s Inventory")
 
-        def pick(pl, idx):
-            if idx == 0:
-                return self._inventory_options(pl, target)
-            elif idx == 1:
-                return self._enderchest_options(pl, target)
-            else:
-                return self._pick_online_player(pl)
+        # 1. Populate main inventory slots (0 to 35)
+        for i in range(36):
+            item = target.inventory.get_item(i)
+            if item and str(item.type) != "minecraft:air":
+                menu.inventory.set_item(i, item)
 
-        form.on_submit = pick
-        viewer.send_form(form)
-
-    def _inventory_options(self, viewer: Player, target: Player):
-        """Sub-menu for Inventory viewing options"""
-        tname = player_name(target)
-        form = ActionForm(
-            title=f"§l{tname}'s Inventory",
-            content="Choose how to view:\n\n§eActions§r - Take/Copy/Remove items\n§bView Only§r - Visual chest display"
-        )
-        form.add_button("§eActions (List View)")  # 0
-
-        if CHEST_FORM_AVAILABLE:
-            form.add_button("§bView Only (Visual Chest)")  # 1
-            form.add_button("« Back")                      # 2
-        else:
-            form.add_button("« Back")                      # 1
-
-        def pick(pl, idx):
-            if idx == 0:
-                return self._open_container(pl, target, which="inv")
-            elif idx == 1:
-                if CHEST_FORM_AVAILABLE:
-                    return self._show_chest_form(pl, target, which="inv")
-                else:
-                    return self._inspect_online_player(pl, target)
-            else:
-                return self._inspect_online_player(pl, target)
-
-        form.on_submit = pick
-        viewer.send_form(form)
-
-    def _enderchest_options(self, viewer: Player, target: Player):
-        """Sub-menu for Ender Chest viewing options"""
-        tname = player_name(target)
-        form = ActionForm(
-            title=f"§l{tname}'s Ender Chest",
-            content="Choose how to view:\n\n§eActions§r - Take/Copy/Remove items\n§bView Only§r - Visual chest display"
-        )
-        form.add_button("§eActions (List View)")  # 0
-
-        if CHEST_FORM_AVAILABLE:
-            form.add_button("§bView Only (Visual Chest)")  # 1
-            form.add_button("« Back")                      # 2
-        else:
-            form.add_button("« Back")                      # 1
-
-        def pick(pl, idx):
-            if idx == 0:
-                return self._open_container(pl, target, which="ender")
-            elif idx == 1:
-                if CHEST_FORM_AVAILABLE:
-                    return self._show_chest_form(pl, target, which="ender")
-                else:
-                    return self._inspect_online_player(pl, target)
-            else:
-                return self._inspect_online_player(pl, target)
-
-        form.on_submit = pick
-        viewer.send_form(form)
-
-    def _open_container(self, viewer: Player, target: Player, which: str):
-        tname = player_name(target)
-        if which == "inv":
-            inv = get_inventory(target)
-            title = "Inventory"
-        else:
-            inv = get_ender(target)
-            title = "Ender Chest"
-
-        if not inv:
-            viewer.send_message(f"§cCan't read {title.lower()} on this build.")
-            return self._inspect_online_player(viewer, target)
-
-        size = inv_size(inv)
-        form = ActionForm(title=f"{title}: {tname}", content=f"{size} slots")
-        for i in range(size):
-            it = get_item_from_slot(inv, i)
-            if not it or is_air(it):
-                form.add_button(f"[{i}] — empty —")
-            else:
-                name = item_display_name(it)
-                cnt  = getattr(it, "amount", None) or getattr(it, "count", None) or 1
-                form.add_button(f"[{i}] {name} ×{cnt}")
-        form.add_button("« Back to Player")  # idx == size
-
-        def pick(pl, idx):
-            if idx == size:
-                return self._inspect_online_player(pl, target)
-            if idx is None or idx < 0 or idx >= size:
-                return self._inspect_online_player(pl, target)
-            return self._slot_actions(pl, target, inv, idx, title)
-        form.on_submit = pick
-        viewer.send_form(form)
-
-    def _slot_actions(self, viewer: Player, target: Player, inv, slot_idx: int, title: str):
-        it = get_item_from_slot(inv, slot_idx)
-        if not it or is_air(it):
-            viewer.send_message("§7That slot is empty.")
-            return self._open_container(viewer, target, "inv" if title == "Inventory" else "ender")
-
-        name = item_display_name(it)
-        cnt  = getattr(it, "amount", None) or getattr(it, "count", None) or 1
-
-        f = ActionForm(title=f"{title} [{slot_idx}]", content=f"§l{name}§r ×{cnt}")
-        f.add_button("Take")                # 0
-        f.add_button("Copy to me")          # 1
-        f.add_button("Remove (clear slot)") # 2
-        f.add_button("Back to slots")       # 3
-        f.add_button("Back to player")      # 4
-
-        def on_pick(pl, btn_idx):
-            if btn_idx == 0:  # Take
-                dst = get_inventory(pl)
-                if not dst:
-                    pl.send_message("§cCan't access your inventory.")
-                    return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-                item_now = get_item_from_slot(inv, slot_idx)
-                if not item_now or is_air(item_now):
-                    pl.send_message("§7Item no longer there.")
-                    return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-                if add_item(dst, item_now):
-                    set_item_in_slot(inv, slot_idx, None)
-                    pl.send_message("§aItem moved to your inventory.")
-                else:
-                    pl.send_message("§cYour inventory is full.")
-                return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-
-            if btn_idx == 1:  # Copy
-                dst = get_inventory(pl)
-                if not dst:
-                    pl.send_message("§cCan't access your inventory.")
-                    return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-                item_now = get_item_from_slot(inv, slot_idx)
-                if not item_now or is_air(item_now):
-                    pl.send_message("§7Item no longer there.")
-                    return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-                if add_item(dst, item_now):
-                    pl.send_message("§aA copy was added to your inventory.")
-                else:
-                    pl.send_message("§cYour inventory is full.")
-                return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-
-            if btn_idx == 2:  # Remove
-                item_now = get_item_from_slot(inv, slot_idx)
-                if not item_now or is_air(item_now):
-                    pl.send_message("§7Nothing to remove.")
-                else:
-                    if set_item_in_slot(inv, slot_idx, None):
-                        pl.send_message("§aSlot cleared.")
-                    else:
-                        pl.send_message("§cFailed to clear that slot on this build.")
-                return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-
-            if btn_idx == 3:
-                return self._open_container(pl, target, "inv" if title == "Inventory" else "ender")
-            if btn_idx == 4:
-                return self._inspect_online_player(pl, target)
-        f.on_submit = on_pick
-        viewer.send_form(f)
-
-    def _show_chest_form(self, viewer: Player, target: Player, which: str):
-        """Display inventory or ender chest using visual ChestForm (READ-ONLY view)"""
-        if not CHEST_FORM_AVAILABLE:
-            viewer.send_message("§cChest form display is not available.")
-            return self._inspect_online_player(viewer, target)
-
-        tname = player_name(target)
-        if which == "inv":
-            inv = get_inventory(target)
-            title = f"{tname}'s Inventory (View Only)"
-            allow_armor = True
-        else:
-            inv = get_ender(target)
-            title = f"{tname}'s Ender Chest (View Only)"
-            allow_armor = False
-
-        if not inv:
-            viewer.send_message(f"§cCan't read inventory on this build.")
-            return self._inspect_online_player(viewer, target)
-
-        # Create chest form (read-only - no callback to prevent interactions)
-        chest = ChestForm(self, title, allow_armor)
-
-        # DO NOT set any callback - this prevents the ItemStack callable error
-        # The chest will be view-only by default without a callback
-
-        # Populate chest with items using full ItemStack to preserve NBT
-        size = inv_size(inv)
-
-        # For ender chest, we need to handle the slot mapping differently
-        if which == "ender":
-            # Ender chest: Direct mapping (slot 0 -> chest slot 0)
-            # Using PrimeBDS approach - no pre-fill needed
-            try:
-                for slot_idx in range(min(size, 27)):
-                    item = get_item_from_slot(inv, slot_idx)
-                    if item and not is_air(item):
-                        # Direct mapping - no offset needed
-                        self._add_item_to_chest(chest, item, slot_idx)
-            except Exception as e:
-                self.logger.warning(f"Error reading ender chest: {e}")
-        else:
-            # Player inventory: Map to chest positions
-            # Using PrimeBDS approach - no pre-fill needed
-            for slot_idx in range(size):
-                item = get_item_from_slot(inv, slot_idx)
-                if item and not is_air(item):
-                    # Map slot to chest position
-                    chest_slot = self._map_slot_to_chest(slot_idx, which)
-                    if chest_slot is not None:
-                        self._add_item_to_chest(chest, item, chest_slot)
-
-        # Send chest form to viewer
-        chest.send_to(viewer)
-
-        # Send message to viewer
-        viewer.send_message("§7This is a read-only view. Use the list view to Take/Copy/Remove items.")
-
-    def _add_item_to_chest(self, chest, item, chest_slot: int):
-        """Add an item to the chest form with full NBT data"""
+        # 2. Add divider panes in slots 36-44 and 50-53
+        divider = ItemStack("minecraft:gray_stained_glass_pane", 1)
         try:
-            item_type = str(item.type) if hasattr(item, 'type') else "minecraft:barrier"
-            item_amount = getattr(item, 'amount', 1)
-            item_data = getattr(item, 'data', 0)
+            meta = divider.item_meta
+            if meta:
+                meta.display_name = "§r§8Divider"
+                divider.set_item_meta(meta)
+        except Exception:
+            pass
 
-            # Extract metadata for display
-            display_name = ""
-            lore = []
-            enchants = None
+        divider_slots = list(range(36, 45)) + list(range(50, 54))
+        for slot in divider_slots:
+            menu.inventory.set_item(slot, divider)
 
-            if hasattr(item, 'item_meta') and item.item_meta:
-                meta = item.item_meta
-                if hasattr(meta, 'display_name') and meta.display_name:
-                    display_name = meta.display_name
-                if hasattr(meta, 'lore') and meta.lore:
-                    lore = meta.lore if isinstance(meta.lore, list) else [meta.lore]
-                if hasattr(meta, 'enchants') and meta.enchants:
-                    enchants = meta.enchants
+        # 3. Populate armor and offhand slots (45 to 49)
+        helm = target.inventory.helmet
+        if helm and str(helm.type) != "minecraft:air":
+            menu.inventory.set_item(45, helm)
+        chest = target.inventory.chestplate
+        if chest and str(chest.type) != "minecraft:air":
+            menu.inventory.set_item(46, chest)
+        legs = target.inventory.leggings
+        if legs and str(legs.type) != "minecraft:air":
+            menu.inventory.set_item(47, legs)
+        boots = target.inventory.boots
+        if boots and str(boots.type) != "minecraft:air":
+            menu.inventory.set_item(48, boots)
+        offhand = target.inventory.item_in_off_hand
+        if offhand and str(offhand.type) != "minecraft:air":
+            menu.inventory.set_item(49, offhand)
 
-            # Add enchantment info to lore if present
-            if enchants and isinstance(enchants, dict):
-                if not lore:
-                    lore = []
-                for ench_name, ench_level in enchants.items():
-                    lore.append(f"§9{ench_name} {ench_level}")
-
-            # For shulker boxes, try to add contents to lore
-            if "shulker" in item_type.lower():
-                # Try to get shulker contents from NBT
-                try:
-                    if hasattr(item, 'nbt') and item.nbt:
-                        if not lore:
-                            lore = []
-                        lore.append("§7(Contains items)")
-                except:
-                    pass
-
-            # Set slot with NBT data
-            # NOTE: Pass None as third parameter instead of ItemStack to avoid callable error
-            # The ChestForm API will reconstruct the item from the other parameters
-            chest.set_slot(
-                chest_slot,
-                item_type,
-                None,  # Don't pass ItemStack directly - causes callable error
-                item_amount=item_amount,
-                item_data=item_data,
-                display_name=display_name,
-                lore=lore if lore else None,
-                enchants=enchants
+        # 4. Listeners
+        def on_transaction(tr: MenuTransaction) -> MenuTransactionResult:
+            if tr.slot in divider_slots:
+                return tr.discard()
+            
+            # Sync live target inventory in delayed task
+            self.server.scheduler.run_task(
+                self,
+                lambda: self._sync_online_inventory(target, menu),
+                delay=1
             )
-        except Exception as e:
-            self.logger.warning(f"Failed to add item to chest slot {chest_slot}: {e}")
+            return tr.proceed()
 
-    def _map_slot_to_chest(self, slot_idx: int, which: str) -> int:
-        """Map inventory slot index to chest form slot"""
-        if which == "ender":
-            # Ender chest: direct mapping (0-26)
-            return slot_idx
-        else:
-            # Player inventory: map main inventory slots (9-35) to chest slots (0-26)
-            # and hotbar (0-8) to chest slots (27-35)
-            if 9 <= slot_idx <= 35:
-                return slot_idx - 9  # Main inventory
-            elif 0 <= slot_idx <= 8:
-                return 27 + slot_idx  # Hotbar
-            else:
-                return None  # Armor/offhand slots - handled separately by allow_armor
+        def on_close(closed_player: Player) -> None:
+            self._sync_online_inventory(target, menu)
+            closed_player.send_message(f"§aSaved and closed {tname}'s inventory.")
 
-    # ──────────────────────────────────────────────────────────────────────
-    # OFFLINE PLAYER ENDER CHEST VIEWING
-    # ──────────────────────────────────────────────────────────────────────
-    def _pick_offline_player(self, viewer: Player):
-        """Show text input to search for offline player"""
-        if not RAPIDNBT_AVAILABLE:
-            viewer.send_message("§cRapidNBT is not available. Cannot view offline player data.")
-            return self.open(viewer)
+        menu.set_listener(on_transaction)
+        menu.set_close_listener(on_close)
+        menu.send_to(viewer)
 
-        if not CHEST_FORM_AVAILABLE:
-            viewer.send_message("§cChestForm is not available. Cannot display offline ender chests.")
-            return self.open(viewer)
-
-        # Create text input form
-        form = ModalForm(
-            title="§lOffline Player Search",
-            controls=[
-                TextInput(
-                    label="Player Name",
-                    placeholder="Enter player name...",
-                    default_value=""
-                )
-            ]
-        )
-
-        def on_submit(pl, data):
-            if data is None:
-                # User cancelled
-                return self.open(pl)
-
-            # Get player name and strip leading/trailing whitespace
-            # Preserves spaces within the name (e.g., "Player Name" stays as "Player Name")
-            player_name = data[0].strip() if data and len(data) > 0 else ""
-
-            if not player_name or player_name == "":
-                pl.send_message("§cPlease enter a player name.")
-                return self._pick_offline_player(pl)
-
-            # Search for player file (supports names with spaces)
-            return self._find_offline_player(pl, player_name)
-
-        form.on_submit = on_submit
-        viewer.send_form(form)
-
-    def _find_offline_player(self, viewer: Player, search_name: str):
-        """Find offline player by name and show their ender chest (Database first, NBT fallback)"""
-
-        # Try database first
-        if hasattr(self, 'db') and self.db:
-            try:
-                users = self.db.search_users_by_name(search_name)
-
-                if users:
-                    if len(users) == 1:
-                        # Single match - show directly from database
-                        user = users[0]
-                        return self._show_offline_enderchest_from_db(viewer, user)
-                    else:
-                        # Multiple matches - show selection
-                        return self._show_user_selection(viewer, users, search_name)
-
-                # No database matches - try NBT fallback
-                self.logger.debug(f"No database matches for '{search_name}', trying NBT fallback")
-            except Exception as e:
-                self.logger.error(f"Database search failed: {e}, falling back to NBT")
-
-        # Fallback to NBT file reading (for players who haven't joined since database was added)
-        if not RAPIDNBT_AVAILABLE:
-            viewer.send_message(f"§cNo player found matching '{search_name}' in database.")
-            viewer.send_message("§7Note: Players must join at least once for offline viewing.")
-            return self._pick_offline_player(viewer)
-
-        return self._find_offline_player_nbt(viewer, search_name)
-
-    def _show_user_selection(self, viewer: Player, users: list, search_name: str):
-        """Show selection menu for multiple user matches"""
-        form = ActionForm(
-            title="§lMultiple Matches Found",
-            content=f"§7Found {len(users)} players matching '§e{search_name}§7'"
-        )
-
-        for user in users:
-            form.add_button(f"§7{user.name}")
-
-        form.add_button("« Search Again")
-
-        def on_submit(pl, idx):
-            if idx is None or idx >= len(users):
-                return self._pick_offline_player(pl)
-
-            user = users[idx]
-            return self._show_offline_enderchest_from_db(pl, user)
-
-        form.on_submit = on_submit
-        viewer.send_form(form)
-
-    def _find_offline_player_nbt(self, viewer: Player, search_name: str):
-        """Find offline player by name using NBT files (fallback method)"""
-        # Get world folder path - try common Bedrock server locations
-        possible_paths = [
-            Path("worlds") / "Bedrock level" / "players",  # Default Bedrock world
-            Path("worlds") / "world" / "players",           # Alternative name
-            Path("Bedrock level") / "players",              # Direct path
-            Path("world") / "players",                      # Direct alternative
-        ]
-
-        player_data_path = None
-        for path in possible_paths:
-            if path.exists():
-                player_data_path = path
-                break
-
-        if not player_data_path or not player_data_path.exists():
-            viewer.send_message("§cPlayer data folder not found.")
-            viewer.send_message("§7Tried: worlds/Bedrock level/players, worlds/world/players")
-            return self.open(viewer)
-
-        # Get list of player files
-        player_files = list(player_data_path.glob("*.dat"))
-
-        if not player_files:
-            viewer.send_message("§cNo offline player data found.")
-            return self.open(viewer)
-
-        # Search for matching player (supports spaces in names)
-        search_lower = search_name.lower()
-        matches = []
-
-        for player_file in player_files:
-            # Try to read player name from NBT data
-            try:
-                nbt_data = RapidNBT.read_nbt(str(player_file))
-                player_name = nbt_data.get("PlayerName", player_file.stem)
-                if not player_name or player_name == "":
-                    player_name = player_file.stem
-
-                # Check if name matches (case-insensitive, preserves spaces)
-                if search_lower in player_name.lower():
-                    matches.append((player_name, player_file))
-
-            except Exception as e:
-                # Fallback to filename if NBT read fails
-                self.logger.warning(f"Failed to read player name from {player_file}: {e}")
-                player_name = player_file.stem
-                if search_lower in player_name.lower():
-                    matches.append((player_name, player_file))
-
-        if not matches:
-            viewer.send_message(f"§cNo offline player found matching '{search_name}'")
-            return self._pick_offline_player(viewer)
-
-        if len(matches) == 1:
-            # Exact match - show directly
-            player_name, player_file = matches[0]
-            return self._show_offline_enderchest_nbt(viewer, player_name, player_file)
-
-        # Multiple matches - show selection
-        form = ActionForm(
-            title="§lMultiple Matches Found (NBT)",
-            content=f"§7Found {len(matches)} players matching '§e{search_name}§7'"
-        )
-
-        for player_name, _ in matches:
-            form.add_button(f"§7{player_name}")
-
-        form.add_button("« Search Again")
-
-        def on_submit(pl, idx):
-            if idx is None or idx >= len(matches):
-                return self._pick_offline_player(pl)
-
-            player_name, player_file = matches[idx]
-            return self._show_offline_enderchest_nbt(pl, player_name, player_file)
-
-        form.on_submit = on_submit
-        viewer.send_form(form)
-
-    def _show_offline_enderchest_from_db(self, viewer: Player, user):
-        """Display offline player's ender chest from database - choose between visual or actions"""
-        form = ActionForm(
-            title=f"§l{user.name}'s Ender Chest (Offline - Database)",
-            content="Choose how to view:\n\n§eActions§r - Copy items to your inventory\n§bView Only§r - Visual chest display"
-        )
-        form.add_button("§eActions (List View)")  # 0
-
-        if CHEST_FORM_AVAILABLE:
-            form.add_button("§bView Only (Visual Chest)")  # 1
-            form.add_button("« Back")                      # 2
-        else:
-            form.add_button("« Back")                      # 1
-
-        def pick(pl, idx):
-            if idx == 0:
-                return self._show_offline_enderchest_list_db(pl, user)
-            elif idx == 1:
-                if CHEST_FORM_AVAILABLE:
-                    return self._show_offline_enderchest_visual_db(pl, user)
+    def _sync_online_inventory(self, target: Player, menu: Menu):
+        try:
+            # Main inventory slots 0-35
+            for i in range(36):
+                gui_item = menu.inventory.get_item(i)
+                if gui_item is None or str(gui_item.type) == "minecraft:air":
+                    target.inventory.set_item(i, None)
                 else:
-                    return self._pick_offline_player(pl)
-            else:
-                return self._pick_offline_player(pl)
+                    target.inventory.set_item(i, gui_item)
 
-        form.on_submit = pick
-        viewer.send_form(form)
+            # Armor and Offhand slots
+            helm = menu.inventory.get_item(45)
+            target.inventory.helmet = None if (helm is None or str(helm.type) == "minecraft:air") else helm
+            chest = menu.inventory.get_item(46)
+            target.inventory.chestplate = None if (chest is None or str(chest.type) == "minecraft:air") else chest
+            legs = menu.inventory.get_item(47)
+            target.inventory.leggings = None if (legs is None or str(legs.type) == "minecraft:air") else legs
+            boots = menu.inventory.get_item(48)
+            target.inventory.boots = None if (boots is None or str(boots.type) == "minecraft:air") else boots
+            offhand = menu.inventory.get_item(49)
+            target.inventory.item_in_off_hand = None if (offhand is None or str(offhand.type) == "minecraft:air") else offhand
 
-    def _show_offline_enderchest_nbt(self, viewer: Player, player_name: str, player_file: Path):
-        """Display offline player's ender chest from NBT - choose between visual or actions"""
-        form = ActionForm(
-            title=f"§l{player_name}'s Ender Chest (Offline - NBT)",
-            content="Choose how to view:\n\n§eActions§r - Copy items to your inventory\n§bView Only§r - Visual chest display"
-        )
-        form.add_button("§eActions (List View)")  # 0
+            self.db.save_inventory(target)
+        except Exception as e:
+            self.logger.error(f"Error syncing online inventory for {target.name}: {e}")
 
-        if CHEST_FORM_AVAILABLE:
-            form.add_button("§bView Only (Visual Chest)")  # 1
-            form.add_button("« Back")                      # 2
-        else:
-            form.add_button("« Back")                      # 1
+    def _open_online_enderchest_ui(self, viewer: Player, target: Player):
+        """Open target player's ender chest as interactive Menu using endstone-inventoryui"""
+        tname = player_name(target)
+        menu = Menu(MenuType.CHEST, f"{tname}'s Ender Chest")
 
-        def pick(pl, idx):
-            if idx == 0:
-                return self._show_offline_enderchest_list_nbt(pl, player_name, player_file)
-            elif idx == 1:
-                if CHEST_FORM_AVAILABLE:
-                    return self._show_offline_enderchest_visual_nbt(pl, player_name, player_file)
+        for i in range(27):
+            item = target.ender_chest.get_item(i)
+            if item and str(item.type) != "minecraft:air":
+                menu.inventory.set_item(i, item)
+
+        def on_transaction(tr: MenuTransaction) -> MenuTransactionResult:
+            self.server.scheduler.run_task(
+                self,
+                lambda: self._sync_online_enderchest(target, menu),
+                delay=1
+            )
+            return tr.proceed()
+
+        def on_close(closed_player: Player) -> None:
+            self._sync_online_enderchest(target, menu)
+            closed_player.send_message(f"§aSaved and closed {tname}'s ender chest.")
+
+        menu.set_listener(on_transaction)
+        menu.set_close_listener(on_close)
+        menu.send_to(viewer)
+
+    def _sync_online_enderchest(self, target: Player, menu: Menu):
+        try:
+            for i in range(27):
+                gui_item = menu.inventory.get_item(i)
+                if gui_item is None or str(gui_item.type) == "minecraft:air":
+                    target.ender_chest.set_item(i, None)
                 else:
-                    return self._pick_offline_player(pl)
-            else:
-                return self._pick_offline_player(pl)
+                    target.ender_chest.set_item(i, gui_item)
 
-        form.on_submit = pick
-        viewer.send_form(form)
+            self.db.save_enderchest(target)
+        except Exception as e:
+            self.logger.error(f"Error syncing online ender chest for {target.name}: {e}")
 
     # ──────────────────────────────────────────────────────────────────────
-    # DATABASE-BASED OFFLINE ENDER CHEST VIEWING
+    # OFFLINE CONTAINERS HANDLING
     # ──────────────────────────────────────────────────────────────────────
 
-    def _show_offline_enderchest_list_db(self, viewer: Player, user):
-        """Show offline ender chest as list with copy actions (from database)"""
+    def _open_offline_inventory_ui(self, viewer: Player, user):
+        """Open offline player's inventory as interactive Menu using endstone-inventoryui"""
+        menu = Menu(MenuType.DOUBLE_CHEST, f"{user.name}'s Inventory (Offline)")
+
+        # 1. Populate divider panes in slots 36-44 and 50-53
+        divider = ItemStack("minecraft:gray_stained_glass_pane", 1)
         try:
-            # Get ender chest data from database
-            ender_items = self.db.get_enderchest(user.xuid)
+            meta = divider.item_meta
+            if meta:
+                meta.display_name = "§r§8Divider"
+                divider.set_item_meta(meta)
+        except Exception:
+            pass
 
-            if not ender_items:
-                viewer.send_message(f"§c{user.name}'s ender chest is empty or data not found.")
-                return self._show_offline_enderchest_from_db(viewer, user)
+        divider_slots = list(range(36, 45)) + list(range(50, 54))
+        for slot in divider_slots:
+            menu.inventory.set_item(slot, divider)
 
-            # Create list form
-            form = ActionForm(
-                title=f"§l{user.name}'s Ender Chest (Offline - DB)",
-                content="§7Click an item to copy it to your inventory"
+        # 2. Load and deserialize items from the SQLite database
+        try:
+            db_items = self.db.get_inventory(user.xuid)
+            for it_data in db_items:
+                item = deserialize_item(it_data)
+                if not item:
+                    continue
+                slot = it_data.get("slot", 0)
+                if 0 <= slot < 36:
+                    menu.inventory.set_item(slot, item)
+                elif slot == -1:
+                    menu.inventory.set_item(45, item)
+                elif slot == -2:
+                    menu.inventory.set_item(46, item)
+                elif slot == -3:
+                    menu.inventory.set_item(47, item)
+                elif slot == -4:
+                    menu.inventory.set_item(48, item)
+                elif slot == -5:
+                    menu.inventory.set_item(49, item)
+        except Exception as e:
+            self.logger.error(f"Error loading offline inventory for {user.name}: {e}")
+
+        # 3. Listeners
+        def on_transaction(tr: MenuTransaction) -> MenuTransactionResult:
+            if tr.slot in divider_slots:
+                return tr.discard()
+            
+            # Sync offline database changes in delayed task
+            self.server.scheduler.run_task(
+                self,
+                lambda: self._sync_offline_inventory(user, menu),
+                delay=1
             )
+            return tr.proceed()
 
-            # Sort by slot
-            ender_items.sort(key=lambda x: x.get("slot", 0))
+        def on_close(closed_player: Player) -> None:
+            self._sync_offline_inventory(user, menu)
+            closed_player.send_message(f"§aSaved and closed offline player {user.name}'s inventory.")
 
-            for item_data in ender_items:
-                slot = item_data.get("slot", -1)
-                item_type = item_data.get("type", "minecraft:barrier")
-                item_count = item_data.get("amount", 1)
-                display_name = item_data.get("display_name", "")
+        menu.set_listener(on_transaction)
+        menu.set_close_listener(on_close)
+        menu.send_to(viewer)
 
-                # Create button text
-                name = display_name if display_name else item_type.replace("minecraft:", "")
-                form.add_button(f"[{slot}] {name} ×{item_count}")
+    def _sync_offline_inventory(self, user, menu: Menu):
+        try:
+            items = []
+            # Main inventory slots 0-35
+            for i in range(36):
+                gui_item = menu.inventory.get_item(i)
+                if gui_item and str(gui_item.type) != "minecraft:air":
+                    items.append(serialize_item(gui_item, i, "slot"))
+            
+            # Armor and offhand map
+            armor_map = {
+                45: (-1, "helmet"),
+                46: (-2, "chestplate"),
+                47: (-3, "leggings"),
+                48: (-4, "boots"),
+                49: (-5, "item_in_off_hand")
+            }
+            for gui_slot, (db_slot, slot_type) in armor_map.items():
+                gui_item = menu.inventory.get_item(gui_slot)
+                if gui_item and str(gui_item.type) != "minecraft:air":
+                    items.append(serialize_item(gui_item, db_slot, slot_type))
 
-            form.add_button("« Back")
-
-            def on_select(pl, idx):
-                if idx is None or idx >= len(ender_items):
-                    return self._show_offline_enderchest_from_db(pl, user)
-
-                selected_item = ender_items[idx]
-                return self._offline_item_actions_db(pl, user, selected_item)
-
-            form.on_submit = on_select
-            viewer.send_form(form)
-
+            items_json = json.dumps(items, ensure_ascii=False)
+            with self.db._lock:
+                self.db.cursor.execute("""
+                    INSERT OR REPLACE INTO inventories_v2 (xuid, name, items_json)
+                    VALUES (?, ?, ?)
+                """, (user.xuid, user.name, items_json))
+                self.db.conn.commit()
         except Exception as e:
-            self.logger.error(f"Error reading offline player data for {user.name}: {e}")
-            viewer.send_message(f"§cFailed to load {user.name}'s ender chest data.")
-            return self._pick_offline_player(viewer)
+            self.logger.error(f"Error saving offline inventory for {user.name}: {e}")
 
-    def _show_offline_enderchest_visual_db(self, viewer: Player, user):
-        """Display offline player's ender chest using ChestForm (read-only, from database)"""
-        if not CHEST_FORM_AVAILABLE:
-            viewer.send_message("§cChestForm is not available.")
-            return self._show_offline_enderchest_from_db(viewer, user)
+    def _open_offline_enderchest_ui(self, viewer: Player, user):
+        """Open offline player's ender chest as interactive Menu using endstone-inventoryui"""
+        menu = Menu(MenuType.CHEST, f"{user.name}'s Ender Chest (Offline)")
 
         try:
-            # Get ender chest data from database
-            ender_items = self.db.get_enderchest(user.xuid)
-
-            # Create chest form
-            chest = ChestForm(self, f"{user.name}'s Ender Chest (Offline - DB - View Only)", False)
-
-            # Populate chest with items from database
-            for item_data in ender_items:
-                slot = item_data.get("slot", -1)
-                if slot < 0 or slot > 26:
+            db_items = self.db.get_enderchest(user.xuid)
+            for it_data in db_items:
+                item = deserialize_item(it_data)
+                if not item:
                     continue
-
-                item_type = item_data.get("type", "minecraft:barrier")
-                item_count = item_data.get("amount", 1)
-                item_damage = item_data.get("damage", 0)
-                display_name = item_data.get("display_name", "")
-                lore = item_data.get("lore", [])
-                enchants_dict = item_data.get("enchants", {})
-
-                # Convert enchants dict to ChestForm format
-                enchants = enchants_dict if enchants_dict else None
-
-                # Add item to chest
-                try:
-                    chest.set_slot(
-                        slot,
-                        item_type,
-                        None,
-                        item_amount=item_count,
-                        item_data=item_damage,
-                        display_name=display_name,
-                        lore=lore if lore else None,
-                        enchants=enchants
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to set offline ender chest slot {slot}: {e}")
-
-            # Send chest form (read-only, no callback)
-            chest.send_to(viewer)
-
+                slot = it_data.get("slot", 0)
+                if 0 <= slot < 27:
+                    menu.inventory.set_item(slot, item)
         except Exception as e:
-            self.logger.error(f"Error displaying offline ender chest for {user.name}: {e}")
-            viewer.send_message(f"§cFailed to display {user.name}'s ender chest.")
-            return self._show_offline_enderchest_from_db(viewer, user)
+            self.logger.error(f"Error loading offline ender chest for {user.name}: {e}")
 
-    def _offline_item_actions_db(self, viewer: Player, user, item_data: dict):
-        """Show actions for an offline ender chest item (from database)"""
-        item_type = item_data.get("type", "minecraft:barrier")
-        item_count = item_data.get("amount", 1)
-        display_name = item_data.get("display_name", "")
-
-        name = display_name if display_name else item_type.replace("minecraft:", "")
-
-        form = ActionForm(
-            title=f"§l{name}",
-            content=f"§7Type: §f{item_type}\n§7Amount: §f{item_count}\n\n§eWhat would you like to do?"
-        )
-        form.add_button("§aCopy to My Inventory")
-        form.add_button("« Back")
-
-        def on_action(pl, idx):
-            if idx == 0:
-                # Copy item
-                return self._copy_offline_item_db(pl, user, item_data)
-            else:
-                return self._show_offline_enderchest_list_db(pl, user)
-
-        form.on_submit = on_action
-        viewer.send_form(form)
-
-    def _copy_offline_item_db(self, viewer: Player, user, item_data: dict):
-        """Copy an offline ender chest item to viewer's inventory (from database)"""
-        try:
-            from endstone.inventory import ItemStack
-
-            item_type = item_data.get("type", "minecraft:barrier")
-            item_count = item_data.get("amount", 1)
-            item_damage = item_data.get("damage", 0)
-            display_name = item_data.get("display_name", "")
-            enchants = item_data.get("enchants", {})
-            lore = item_data.get("lore", [])
-            unbreakable = item_data.get("unbreakable", False)
-
-            # Create ItemStack
-            item = ItemStack(item_type, item_count)
-
-            # Set item metadata if available
-            if hasattr(item, "item_meta"):
-                meta = item.item_meta
-                if display_name:
-                    meta.display_name = display_name
-                if enchants:
-                    meta.enchants = enchants
-                if lore:
-                    meta.lore = lore
-                if unbreakable:
-                    meta.is_unbreakable = True
-                if item_damage:
-                    meta.damage = item_damage
-
-                item.item_meta = meta
-
-            # Add to viewer's inventory
-            viewer.inventory.add_item(item)
-
-            name = display_name if display_name else item_type.replace("minecraft:", "")
-            viewer.send_message(f"§aCopied §f{name} ×{item_count} §ato your inventory!")
-
-            return self._show_offline_enderchest_list_db(viewer, user)
-
-        except Exception as e:
-            self.logger.error(f"Failed to copy offline item: {e}")
-            viewer.send_message("§cFailed to copy item to your inventory.")
-            return self._show_offline_enderchest_list_db(viewer, user)
-
-    # ──────────────────────────────────────────────────────────────────────
-    # NBT-BASED OFFLINE ENDER CHEST VIEWING (FALLBACK)
-    # ──────────────────────────────────────────────────────────────────────
-
-    def _show_offline_enderchest_list_nbt(self, viewer: Player, player_name: str, player_file: Path):
-        """Show offline ender chest as list with copy actions (from NBT file)"""
-        try:
-            # Read player NBT data
-            nbt_data = RapidNBT.read_nbt(str(player_file))
-
-            # Get ender chest inventory from NBT
-            ender_items = nbt_data.get("EnderChestInventory", [])
-
-            if not ender_items:
-                viewer.send_message(f"§c{player_name}'s ender chest is empty or data not found.")
-                return self._show_offline_enderchest_nbt(viewer, player_name, player_file)
-
-            # Create list form
-            form = ActionForm(
-                title=f"§l{player_name}'s Ender Chest (Offline)",
-                content="§7Click an item to copy it to your inventory"
+        def on_transaction(tr: MenuTransaction) -> MenuTransactionResult:
+            self.server.scheduler.run_task(
+                self,
+                lambda: self._sync_offline_enderchest(user, menu),
+                delay=1
             )
+            return tr.proceed()
 
-            # Store items for later access
-            item_list = []
+        def on_close(closed_player: Player) -> None:
+            self._sync_offline_enderchest(user, menu)
+            closed_player.send_message(f"§aSaved and closed offline player {user.name}'s ender chest.")
 
-            for item_data in ender_items:
-                if not isinstance(item_data, dict):
-                    continue
+        menu.set_listener(on_transaction)
+        menu.set_close_listener(on_close)
+        menu.send_to(viewer)
 
-                slot = item_data.get("Slot", -1)
-                if slot < 0 or slot > 26:
-                    continue
-
-                item_type = item_data.get("Name", "minecraft:barrier")
-                item_count = item_data.get("Count", 1)
-
-                # Get display name
-                display_name = ""
-                tag = item_data.get("tag", {})
-                if isinstance(tag, dict):
-                    display = tag.get("display", {})
-                    if isinstance(display, dict):
-                        display_name = display.get("Name", "")
-
-                # Create button text
-                name = display_name if display_name else item_type.replace("minecraft:", "")
-                form.add_button(f"[{slot}] {name} ×{item_count}")
-                item_list.append(item_data)
-
-            form.add_button("« Back")
-
-            def on_select(pl, idx):
-                if idx is None or idx >= len(item_list):
-                    return self._show_offline_enderchest_nbt(pl, player_name, player_file)
-
-                selected_item = item_list[idx]
-                return self._offline_item_actions_nbt(pl, player_name, player_file, selected_item)
-
-            form.on_submit = on_select
-            viewer.send_form(form)
-
-        except Exception as e:
-            self.logger.error(f"Error reading offline player data for {player_name}: {e}")
-            viewer.send_message(f"§cFailed to load {player_name}'s ender chest data.")
-            return self._pick_offline_player(viewer)
-
-    def _offline_item_actions_nbt(self, viewer: Player, player_name: str, player_file: Path, item_data: dict):
-        """Show actions for an offline ender chest item (from NBT file)"""
-        slot = item_data.get("Slot", -1)
-        item_type = item_data.get("Name", "minecraft:barrier")
-        item_count = item_data.get("Count", 1)
-
-        # Get display name
-        display_name = ""
-        tag = item_data.get("tag", {})
-        if isinstance(tag, dict):
-            display = tag.get("display", {})
-            if isinstance(display, dict):
-                display_name = display.get("Name", "")
-
-        name = display_name if display_name else item_type.replace("minecraft:", "")
-
-        form = ActionForm(
-            title=f"§lSlot {slot}",
-            content=f"§e{name} §7×{item_count}\n\n§7Choose an action:"
-        )
-        form.add_button("§bCopy to My Inventory")  # 0
-        form.add_button("« Back to List")          # 1
-
-        def on_action(pl, idx):
-            if idx == 0:
-                # Copy item to viewer's inventory
-                return self._copy_offline_item_nbt(pl, player_name, player_file, item_data)
-            else:
-                return self._show_offline_enderchest_list_nbt(pl, player_name, player_file)
-
-        form.on_submit = on_action
-        viewer.send_form(form)
-
-    def _copy_offline_item_nbt(self, viewer: Player, player_name: str, player_file: Path, item_data: dict):
-        """Copy an offline ender chest item to viewer's inventory using RapidNBT (from NBT file)"""
+    def _sync_offline_enderchest(self, user, menu: Menu):
         try:
-            from endstone.inventory import ItemStack
+            items = []
+            for i in range(27):
+                gui_item = menu.inventory.get_item(i)
+                if gui_item and str(gui_item.type) != "minecraft:air":
+                    items.append(serialize_item(gui_item, i, "slot"))
 
-            item_type = item_data.get("Name", "minecraft:barrier")
-            item_count = item_data.get("Count", 1)
-            item_damage = item_data.get("Damage", 0)
-
-            # Create ItemStack
-            item = ItemStack(item_type, item_count, item_damage)
-
-            # Try to apply NBT data to the item
-            tag = item_data.get("tag", {})
-            if isinstance(tag, dict) and tag:
-                # Apply display name and lore if available
-                if hasattr(item, 'item_meta') and item.item_meta:
-                    meta = item.item_meta
-
-                    display = tag.get("display", {})
-                    if isinstance(display, dict):
-                        display_name = display.get("Name", "")
-                        if display_name and hasattr(meta, 'display_name'):
-                            meta.display_name = display_name
-
-                        lore_data = display.get("Lore", [])
-                        if lore_data and hasattr(meta, 'lore'):
-                            meta.lore = lore_data if isinstance(lore_data, list) else [lore_data]
-
-                    # Note: Enchantments might not be directly settable via item_meta
-                    # The NBT data is preserved in the ItemStack creation
-
-            # Add to viewer's inventory
-            viewer_inv = get_inventory(viewer)
-            if not viewer_inv:
-                viewer.send_message("§cCan't access your inventory.")
-                return self._show_offline_enderchest_list_nbt(viewer, player_name, player_file)
-
-            if add_item(viewer_inv, item):
-                viewer.send_message(f"§aCopied item to your inventory!")
-            else:
-                viewer.send_message("§cYour inventory is full.")
-
-            return self._show_offline_enderchest_list_nbt(viewer, player_name, player_file)
-
+            items_json = json.dumps(items, ensure_ascii=False)
+            with self.db._lock:
+                self.db.cursor.execute("""
+                    INSERT OR REPLACE INTO ender_chests_v2 (xuid, name, items_json)
+                    VALUES (?, ?, ?)
+                """, (user.xuid, user.name, items_json))
+                self.db.conn.commit()
         except Exception as e:
-            self.logger.error(f"Error copying offline item: {e}")
-            viewer.send_message("§cFailed to copy item.")
-            return self._show_offline_enderchest_list_nbt(viewer, player_name, player_file)
-
-    def _show_offline_enderchest_visual_nbt(self, viewer: Player, player_name: str, player_file: Path):
-        """Display offline player's ender chest using ChestForm (read-only, from NBT file)"""
-        try:
-            # Read player NBT data
-            nbt_data = RapidNBT.read_nbt(str(player_file))
-
-            # Get ender chest inventory from NBT
-            ender_items = nbt_data.get("EnderChestInventory", [])
-
-            if not ender_items:
-                viewer.send_message(f"§c{player_name}'s ender chest is empty or data not found.")
-                return self._show_offline_enderchest_nbt(viewer, player_name, player_file)
-
-            # Create chest form
-            chest = ChestForm(self, f"{player_name}'s Ender Chest (Offline - View Only)", False)
-
-            # Populate chest with items from NBT (using PrimeBDS approach - no pre-fill needed)
-            for item_data in ender_items:
-                if not isinstance(item_data, dict):
-                    continue
-
-                slot = item_data.get("Slot", -1)
-                if slot < 0 or slot > 26:
-                    continue
-
-                item_type = item_data.get("Name", "minecraft:barrier")
-                item_count = item_data.get("Count", 1)
-                item_damage = item_data.get("Damage", 0)
-
-                # Extract display name and lore from tag
-                display_name = ""
-                lore = []
-                enchants = None
-
-                tag = item_data.get("tag", {})
-                if isinstance(tag, dict):
-                    display = tag.get("display", {})
-                    if isinstance(display, dict):
-                        display_name = display.get("Name", "")
-                        lore_data = display.get("Lore", [])
-                        if isinstance(lore_data, list):
-                            lore = lore_data
-
-                    # Get enchantments
-                    ench_data = tag.get("ench", [])
-                    if isinstance(ench_data, list) and ench_data:
-                        enchants = {}
-                        for ench in ench_data:
-                            if isinstance(ench, dict):
-                                ench_id = ench.get("id", 0)
-                                ench_lvl = ench.get("lvl", 1)
-                                enchants[f"Enchantment {ench_id}"] = ench_lvl
-
-                # Add item to chest - direct mapping (no offset)
-                try:
-                    chest.set_slot(
-                        slot,
-                        item_type,
-                        None,
-                        item_amount=item_count,
-                        item_data=item_damage,
-                        display_name=display_name,
-                        lore=lore if lore else None,
-                        enchants=enchants
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to set offline ender chest slot {slot}: {e}")
-
-            # Send chest to viewer
-            chest.send_to(viewer)
-            viewer.send_message("§7Viewing offline player's ender chest (read-only). Use Actions view to copy items.")
-
-        except Exception as e:
-            self.logger.error(f"Error reading offline player data for {player_name}: {e}")
-            viewer.send_message(f"§cFailed to load {player_name}'s ender chest data.")
-            return self._show_offline_enderchest(viewer, player_name, player_file)
-
-    #
+            self.logger.error(f"Error saving offline ender chest for {user.name}: {e}")
