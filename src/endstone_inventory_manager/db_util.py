@@ -13,17 +13,11 @@ from dataclasses import dataclass
 from endstone import Player
 from endstone.inventory import ItemStack
 
-# NBT classes — may live under endstone.nbt or directly under endstone
-try:
-    from endstone.nbt import (
-        CompoundTag, ListTag, ByteTag, ShortTag, IntTag, LongTag,
-        FloatTag, DoubleTag, StringTag, ByteArrayTag, IntArrayTag,
-    )
-except (ImportError, AttributeError):
-    from endstone import (
-        CompoundTag, ListTag, ByteTag, ShortTag, IntTag, LongTag,
-        FloatTag, DoubleTag, StringTag, ByteArrayTag, IntArrayTag,
-    )
+# Endstone 0.11 exports NBT tag classes from endstone.nbt.
+from endstone.nbt import (
+    CompoundTag, ListTag, ByteTag, ShortTag, IntTag, LongTag,
+    FloatTag, DoubleTag, StringTag, ByteArrayTag, IntArrayTag,
+)
 
 
 # Database folder path
@@ -80,10 +74,10 @@ def dict_to_nbt(data):
             tag[key] = dict_to_nbt(child)
         return tag
     elif t == "list":
-        tag = ListTag()
+        list_tag = ListTag()
         for child in v:
-            tag.append(dict_to_nbt(child))
-        return tag
+            list_tag.append(dict_to_nbt(child))
+        return list_tag
     elif t == "byte":
         return ByteTag(int(v))
     elif t == "short":

@@ -37,7 +37,7 @@ def player_name(player: Player) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 class InventoryManagerPlugin(Plugin):
-    api_version = "0.5"
+    api_version = "0.11"
 
     commands = {
         "manageinv": {
