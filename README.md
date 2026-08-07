@@ -20,8 +20,9 @@
 </p>
 
 <p align="center">
-  <a href="#overview">Overview</a> &bull;
-  <a href="#compatibility">Compatibility</a> &bull;
+  <a href="#what-it-does">What it does</a> &bull;
+  <a href="#how-to-use">How to use</a> &bull;
+  <a href="#commands-and-permissions">Commands</a> &bull;
   <a href="#install">Install</a> &bull;
   <a href="https://github.com/TheNINJALLO/endstone-inventory-manager/releases">Releases</a>
 </p>
@@ -30,9 +31,24 @@
 
 An Endstone plugin for managing player inventories with database-powered offline player support. This release is aligned with Endstone 0.11.8 and Minecraft Bedrock Dedicated Server 1.26.40, and is distributed as a Python wheel for direct installation in an Endstone server.
 
-## Capabilities
+## What it does
 
--
+- Lets staff inspect and edit online player inventories and ender chests through forms.
+- Reads Bedrock player data for offline-player management and stores searchable player records.
+- Includes guarded item actions and database-backed history for safer administration.
+
+## How to use
+
+1. Install `endstone-inventoryui` for the full visual inventory workflow and start the server once.
+2. Grant `inventory_manager.use` only to trusted staff.
+3. Run `/manageinv`, select an online or offline player, then choose the inventory or ender chest to inspect.
+4. Back up player data before performing large offline-inventory changes.
+
+## Commands and permissions
+
+| Command / usage | What it does | Access |
+|---|---|---|
+| `/manageinv` | Open inventory management interface | `inventory_manager.use` |
 
 ## Compatibility
 
