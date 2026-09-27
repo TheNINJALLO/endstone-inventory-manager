@@ -37,6 +37,7 @@ def player_name(player: Player) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 class InventoryManagerPlugin(Plugin):
+    depend = ["inventoryui"]
     api_version = "0.11"
 
     commands = {
@@ -56,7 +57,7 @@ class InventoryManagerPlugin(Plugin):
 
     def on_enable(self) -> None:
         """Called when plugin is enabled"""
-        self.logger.info("Inventory Manager Plugin v1.0.15 enabled!")
+        self.logger.info("Inventory Manager Plugin v1.0.16 enabled!")
 
         # Initialize database
         try:

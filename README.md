@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <img alt="Endstone 0.11.9" src="https://img.shields.io/badge/Endstone-0.11.9-52b7a8?style=flat-square">
+  <img alt="Endstone 0.11.11 / 0.11.12" src="https://img.shields.io/badge/Endstone-0.11.12-52b7a8?style=flat-square">
   <img alt="API 0.11" src="https://img.shields.io/badge/API-0.11-63b8ff?style=flat-square">
-  <img alt="BDS 1.26.44" src="https://img.shields.io/badge/BDS-1.26.44-8b7dff?style=flat-square">
+  <img alt="BDS 1.26.51" src="https://img.shields.io/badge/BDS-1.26.51-8b7dff?style=flat-square">
   <img alt="Python >=3.10" src="https://img.shields.io/badge/Python-%3E=3.10-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white">
 </p>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-An Endstone plugin for managing player inventories with database-powered offline player support. This release is aligned with Endstone 0.11.9 and Minecraft Bedrock Dedicated Server 1.26.44, and is distributed as a Python wheel for direct installation in an Endstone server.
+An Endstone plugin for managing player inventories with database-powered offline player support. This release is aligned with Endstone 0.11.11 / 0.11.12 and Minecraft Bedrock Dedicated Server 1.26.51, and is distributed as a Python wheel for direct installation in an Endstone server.
 
 ## What it does
 
@@ -54,24 +54,24 @@ An Endstone plugin for managing player inventories with database-powered offline
 
 | Component | Supported version |
 |---|---|
-| Endstone | `0.11.9` |
+| Endstone | `0.11.11 / 0.11.12` |
 | Endstone API | `0.11` |
-| Bedrock Dedicated Server | `1.26.44` |
+| Bedrock Dedicated Server | `1.26.51` |
 | Python | `>=3.10` |
-| Plugin release | `v1.0.15` |
+| Plugin release | `v1.0.16` |
 
 ## Install
 
 Download the wheel from the matching GitHub release:
 
 ```bash
-gh release download v1.0.15 --repo TheNINJALLO/endstone-inventory-manager --pattern "*.whl"
+gh release download v1.0.16 --repo TheNINJALLO/endstone-inventory-manager --pattern "*.whl"
 ```
 
 Copy the downloaded wheel into the server's `plugins/` directory, remove any older wheel for the same plugin, and restart Endstone.
 
 > [!IMPORTANT]
-> Use Endstone `0.11.9` with BDS `1.26.44`. Back up worlds and plugin data before upgrading a production server.
+> Use Endstone `0.11.11 / 0.11.12` with BDS `1.26.51`. Back up worlds and plugin data before upgrading a production server.
 
 ## Configuration and secrets
 
@@ -405,3 +405,9 @@ MIT License
 #### v0.1.0
 - Initial release
 - Basic online player inventory management
+
+## 1.0.16 repair release
+
+InventoryUI 2.0.7 is now an explicit plugin dependency and the Python dependency is pinned to its release. Install both wheels and restart to receive the repaired inventory movement, menu opening, and close behavior.
+
+Stop the server before replacing the old wheel. Keep only one version of each plugin in `plugins/`; preserve plugin data folders. InventoryUI-dependent plugins need the InventoryUI wheel in `plugins/`, even when its Python package is already installed.
