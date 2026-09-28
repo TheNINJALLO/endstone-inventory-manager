@@ -57,7 +57,7 @@ class InventoryManagerPlugin(Plugin):
 
     def on_enable(self) -> None:
         """Called when plugin is enabled"""
-        self.logger.info("Inventory Manager Plugin v1.0.16 enabled!")
+        self.logger.info("Inventory Manager Plugin v1.0.17 enabled!")
 
         # Initialize database
         try:

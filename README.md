@@ -58,14 +58,14 @@ An Endstone plugin for managing player inventories with database-powered offline
 | Endstone API | `0.11` |
 | Bedrock Dedicated Server | `1.26.51` |
 | Python | `>=3.10` |
-| Plugin release | `v1.0.16` |
+| Plugin release | `v1.0.17` |
 
 ## Install
 
 Download the wheel from the matching GitHub release:
 
 ```bash
-gh release download v1.0.16 --repo TheNINJALLO/endstone-inventory-manager --pattern "*.whl"
+gh release download v1.0.17 --repo TheNINJALLO/endstone-inventory-manager --pattern "*.whl"
 ```
 
 Copy the downloaded wheel into the server's `plugins/` directory, remove any older wheel for the same plugin, and restart Endstone.
@@ -81,6 +81,10 @@ Runtime databases, logs, local `.env` files, server directories, and root `confi
 
 Every `v*` tag runs [the wheel release workflow](.github/workflows/wheel-release.yml), builds the package in a clean GitHub runner, stores the wheel as a workflow artifact, and attaches it to the matching GitHub release.
 <!-- endstone-professional-header:end -->
+
+## 1.0.17 startup compatibility
+
+Requires InventoryUI **2.0.8**, which fixes startup failures when other plugins overwrite the shared protocol package. Inventory Manager no longer installs that unnecessary shared dependency. Stop the server, replace both wheels, and preserve plugin data before restarting. See [startup troubleshooting](https://github.com/TheNINJALLO/endstone-inventoryui/blob/main/docs/startup.md).
 
 ---
 
