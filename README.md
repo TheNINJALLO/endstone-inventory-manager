@@ -1,3 +1,5 @@
+> Item-storage safety release **1.0.18**, Endstone **0.11.15 / BDS 1.26.60.6**. Requires **InventoryUI 2.0.10**. Preserve auxiliary item data and complete typed NBT, including bundles and lore; abort unreadable offline loads instead of presenting an editable empty inventory.
+
 <!-- endstone-professional-header:start -->
 <p align="center">
   <img src="docs/assets/banner.svg" width="100%" alt="Endstone Inventory Manager &mdash; An Endstone plugin for managing player inventories with database-powered offline player support">
@@ -9,9 +11,9 @@
 </p>
 
 <p align="center">
-  <img alt="Endstone 0.11.11 / 0.11.12" src="https://img.shields.io/badge/Endstone-0.11.12-52b7a8?style=flat-square">
+  <img alt="Endstone 0.11.15" src="https://img.shields.io/badge/Endstone-0.11.12-52b7a8?style=flat-square">
   <img alt="API 0.11" src="https://img.shields.io/badge/API-0.11-63b8ff?style=flat-square">
-  <img alt="BDS 1.26.51" src="https://img.shields.io/badge/BDS-1.26.51-8b7dff?style=flat-square">
+  <img alt="BDS 1.26.60.6" src="https://img.shields.io/badge/BDS-1.26.60.6-8b7dff?style=flat-square">
   <img alt="Python >=3.11" src="https://img.shields.io/badge/Python-%3E=3.11-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white">
 </p>
 
@@ -29,7 +31,7 @@
 
 ## Overview
 
-An Endstone plugin for managing player inventories with database-powered offline player support. This release is aligned with Endstone 0.11.11 / 0.11.12 and Minecraft Bedrock Dedicated Server 1.26.51, and is distributed as a Python wheel for direct installation in an Endstone server.
+An Endstone plugin for managing player inventories with database-powered offline player support. This release is aligned with Endstone 0.11.15 and Minecraft Bedrock Dedicated Server 1.26.60.6, and is distributed as a Python wheel for direct installation in an Endstone server.
 
 ## What it does
 
@@ -54,24 +56,24 @@ An Endstone plugin for managing player inventories with database-powered offline
 
 | Component | Supported version |
 |---|---|
-| Endstone | `0.11.11 / 0.11.12` |
+| Endstone | `0.11.15` |
 | Endstone API | `0.11` |
-| Bedrock Dedicated Server | `1.26.51` |
+| Bedrock Dedicated Server | `1.26.60.6` |
 | Python | `>=3.11` |
-| Plugin release | `v1.0.17` |
+| Plugin release | `v1.0.18` |
 
 ## Install
 
 Download the wheel from the matching GitHub release:
 
 ```bash
-gh release download v1.0.17 --repo TheNINJALLO/endstone-inventory-manager --pattern "*.whl"
+gh release download v1.0.18 --repo TheNINJALLO/endstone-inventory-manager --pattern "*.whl"
 ```
 
 Copy the downloaded wheel into the server's `plugins/` directory, remove any older wheel for the same plugin, and restart Endstone.
 
 > [!IMPORTANT]
-> Use Endstone `0.11.11 / 0.11.12` with BDS `1.26.51`. Back up worlds and plugin data before upgrading a production server.
+> Use Endstone `0.11.15` with BDS `1.26.60.6`. Back up worlds and plugin data before upgrading a production server.
 
 ## Configuration and secrets
 

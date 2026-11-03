@@ -60,11 +60,13 @@ def nbt_to_dict(tag):
     elif isinstance(tag, IntArrayTag):
         return {"_type": "int_array", "value": list(tag)}
     else:
-        return {"_type": "unknown", "value": str(tag)}
+        raise ValueError(f"Unsupported NBT tag: {type(tag).__name__}")
 
 
 def dict_to_nbt(data):
     """Recursively rebuild an NBT Tag from a dict produced by nbt_to_dict."""
+    if not isinstance(data, dict):
+        raise ValueError("Invalid saved NBT tag")
     t = data.get("_type", "unknown")
     v = data.get("value")
 
@@ -97,7 +99,7 @@ def dict_to_nbt(data):
     elif t == "int_array":
         return IntArrayTag(v)
     else:
-        return StringTag(str(v))
+        raise ValueError(f"Unsupported saved NBT type: {t}")
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +116,7 @@ def serialize_item(item, slot_num: int, slot_type: str = "slot") -> dict:
         "slot_type": slot_type,
         "type": str(item.type),
         "amount": item.amount,
+        "data": item.data,
     }
 
     # Save the full NBT compound tag — this preserves everything:
@@ -122,8 +125,8 @@ def serialize_item(item, slot_num: int, slot_type: str = "slot") -> dict:
         nbt_tag = item.nbt
         if nbt_tag is not None:
             result["nbt"] = nbt_to_dict(nbt_tag)
-    except Exception:
-        pass
+    except Exception as error:
+        raise ValueError(f"Could not serialize NBT for {item.type}") from error
 
     return result
 
@@ -136,17 +139,20 @@ def deserialize_item(item_data: dict) -> Optional[ItemStack]:
     item_type = item_data["type"]
     amount = item_data.get("amount", 1)
 
-    item = ItemStack(item_type, amount)
+    item = ItemStack(item_type, amount, item_data.get("data", 0))
 
     # Restore the full NBT compound tag
     nbt_data = item_data.get("nbt")
     if nbt_data is not None:
         try:
             tag = dict_to_nbt(nbt_data)
-            if isinstance(tag, CompoundTag):
-                item.nbt = tag
-        except Exception:
-            pass
+            if not isinstance(tag, CompoundTag):
+                raise ValueError("Item NBT must be a compound")
+            item.nbt = tag
+            if nbt_to_dict(item.nbt) != nbt_data:
+                raise ValueError("Native NBT round trip changed item metadata")
+        except Exception as error:
+            raise ValueError(f"Could not restore NBT for {item_type}") from error
 
     return item
 
@@ -432,7 +438,7 @@ class InventoryDB(DatabaseManager):
             return [item for item in items if item.get("type") is not None]
         except (json.JSONDecodeError, Exception) as e:
             print(f"[InventoryDB] Failed to parse inventory for {xuid}: {e}")
-            return []
+            raise ValueError("Could not read saved inventory") from e
 
     def save_enderchest(self, player: Player):
         """Save player's ender chest as NBT JSON blob"""
@@ -466,4 +472,4 @@ class InventoryDB(DatabaseManager):
             return [item for item in items if item.get("type") is not None]
         except (json.JSONDecodeError, Exception) as e:
             print(f"[InventoryDB] Failed to parse ender chest for {xuid}: {e}")
-            return []
+            raise ValueError("Could not read saved ender chest") from e

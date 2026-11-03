@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "endstone-inventory-manager"
-version = "1.0.17"
+version = "1.0.18"
 description = "An Endstone plugin for managing player inventories with database-powered offline player support"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
     { name = "TheN1NJ4LL0" }
 ]
 dependencies = [
-    "endstone>=0.11.11,<0.12",
-    "endstone-inventoryui @ https://github.com/TheNINJALLO/endstone-inventoryui/archive/refs/tags/v2.0.8.zip"
+    "endstone>=0.11.15,<0.12",
+    "endstone-inventoryui @ https://github.com/TheNINJALLO/endstone-inventoryui/releases/download/v2.0.10/endstone_inventoryui-2.0.10-py3-none-any.whl"
 ]
 
 [project.entry-points."endstone"]

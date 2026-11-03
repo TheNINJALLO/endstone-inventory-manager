@@ -57,7 +57,7 @@ class InventoryManagerPlugin(Plugin):
 
     def on_enable(self) -> None:
         """Called when plugin is enabled"""
-        self.logger.info("Inventory Manager Plugin v1.0.17 enabled!")
+        self.logger.info("Inventory Manager Plugin v1.0.18 enabled!")
 
         # Initialize database
         try:
@@ -444,6 +444,8 @@ class InventoryManagerPlugin(Plugin):
                     menu.inventory.set_item(49, item)
         except Exception as e:
             self.logger.error(f"Error loading offline inventory for {user.name}: {e}")
+            viewer.send_message("§cSaved inventory could not be read; editing was cancelled.")
+            return
 
         # 3. Listeners
         def on_transaction(tr: MenuTransaction) -> MenuTransactionResult:
@@ -513,6 +515,8 @@ class InventoryManagerPlugin(Plugin):
                     menu.inventory.set_item(slot, item)
         except Exception as e:
             self.logger.error(f"Error loading offline ender chest for {user.name}: {e}")
+            viewer.send_message("§cSaved ender chest could not be read; editing was cancelled.")
+            return
 
         def on_transaction(tr: MenuTransaction) -> MenuTransactionResult:
             self.server.scheduler.run_task(
